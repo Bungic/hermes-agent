@@ -838,12 +838,27 @@ def _reasoning_details_blocks(msg: dict, claude: bool, own: bool = False) -> lis
     return blocks
 
 
+def _tool_call_blocks(tool_calls: list) -> list[dict]:
+    """OpenAI ``tool_calls`` → Converse toolUse blocks."""
+    return [
+        _tool_use_block(tc.get("id", ""), fn.get("name", ""), _parse_tool_args(fn.get("arguments", "{}")))
+        for tc in tool_calls if isinstance(tc, dict)
+        for fn in [tc.get("function") or {}]
+    ]
+
+
 def _match_tool_calls(blocks: list[dict], tool_calls: list) -> list[dict]:
-    """Drop a replayed toolUse whose id is no longer in ``tool_calls``: post-call guardrails (identical-call
-    dedup, delegate cap) drop calls after a carrier was captured, and replaying one sends a toolUse with no
-    toolResult (ValidationException "Expected toolResult blocks")."""
+    """Make a replayed carrier's toolUse blocks match ``tool_calls``, which every following toolResult answers.
+    Post-call guardrails (identical-call dedup, delegate cap) drop calls after a carrier was captured, and
+    replaying one sends a toolUse with no toolResult ("Expected toolResult blocks"); a carrier that lost a
+    call sends its toolResult with no toolUse ("number of toolResult blocks exceeds the number of toolUse
+    blocks"). Dropped ids are skipped and lost ones appended, so the carrier still decides the order."""
     ids = {tc.get("id", "") for tc in tool_calls if isinstance(tc, dict)}
-    return [block for block in blocks if "toolUse" not in block or block["toolUse"].get("toolUseId", "") in ids]
+    kept = [block for block in blocks if "toolUse" not in block or block["toolUse"].get("toolUseId", "") in ids]
+    if not kept:
+        return kept
+    replayed = {block["toolUse"].get("toolUseId", "") for block in kept if "toolUse" in block}
+    return kept + _tool_call_blocks([tc for tc in tool_calls if isinstance(tc, dict) and tc.get("id", "") not in replayed])
 
 
 def _assistant_blocks(msg: dict, content, claude: bool = True, own: bool = False) -> list[dict]:
@@ -864,9 +879,7 @@ def _assistant_blocks(msg: dict, content, claude: bool = True, own: bool = False
         content_blocks.append({"text": content})
     elif isinstance(content, list):
         content_blocks.extend(_convert_content_to_converse(content))
-    for tc in (msg.get("tool_calls", []) or []):
-        fn = tc.get("function", {})
-        content_blocks.append(_tool_use_block(tc.get("id", ""), fn.get("name", ""), _parse_tool_args(fn.get("arguments", "{}"))))
+    content_blocks.extend(_tool_call_blocks(tool_calls))
     return content_blocks
 
 
