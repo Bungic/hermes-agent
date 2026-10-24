@@ -838,15 +838,26 @@ def _reasoning_details_blocks(msg: dict, claude: bool, own: bool = False) -> lis
     return blocks
 
 
+def _match_tool_calls(blocks: list[dict], tool_calls: list) -> list[dict]:
+    """Drop a replayed toolUse whose id is no longer in ``tool_calls``: post-call guardrails (identical-call
+    dedup, delegate cap) drop calls after a carrier was captured, and replaying one sends a toolUse with no
+    toolResult (ValidationException "Expected toolResult blocks")."""
+    ids = {tc.get("id", "") for tc in tool_calls if isinstance(tc, dict)}
+    return [block for block in blocks if "toolUse" not in block or block["toolUse"].get("toolUseId", "") in ids]
+
+
 def _assistant_blocks(msg: dict, content, claude: bool = True, own: bool = False) -> list[dict]:
     """Assistant message → Converse blocks, from the first carrier that yields any: the ordered
     ``bedrock_content_blocks`` sidecar, (Claude only) the ordered ``anthropic_content_blocks`` sidecar,
     else thinking from ``reasoning_details`` followed by text, then tool calls. Anthropic-shaped carriers
-    hold Claude signatures, so other models never read them."""
+    hold Claude signatures, so other models never read them. An ordered carrier decides block order,
+    ``tool_calls`` which toolUse blocks exist."""
+    tool_calls = msg.get("tool_calls") or []
     ordered_blocks = msg.get("bedrock_content_blocks")
-    if isinstance(ordered_blocks, list) and (content_blocks := _replay_ordered_blocks(ordered_blocks)):
+    if isinstance(ordered_blocks, list) and (
+            content_blocks := _match_tool_calls(_replay_ordered_blocks(ordered_blocks), tool_calls)):
         return content_blocks
-    if claude and (content_blocks := _anthropic_ordered_blocks(msg)):
+    if claude and (content_blocks := _match_tool_calls(_anthropic_ordered_blocks(msg), tool_calls)):
         return content_blocks
     content_blocks = _reasoning_details_blocks(msg, claude, own)
     if isinstance(content, str) and content.strip():
